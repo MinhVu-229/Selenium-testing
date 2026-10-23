@@ -1,0 +1,128 @@
+package com.koreanwithme.backend.service;
+
+import com.koreanwithme.backend.dto.PaymentDtos.CreatePaymentRequest;
+import com.koreanwithme.backend.dto.PaymentDtos.PaymentInitResponse; 
+import com.koreanwithme.backend.entity.Course;
+import com.koreanwithme.backend.entity.Order;
+import com.koreanwithme.backend.entity.User;
+import com.koreanwithme.backend.repository.CourseRepository;
+import com.koreanwithme.backend.repository.OrderRepository;
+import com.koreanwithme.backend.repository.UserCourseRepository;
+import com.koreanwithme.backend.repository.UserRepository;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.math.BigDecimal;
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class PaymentServiceTest {
+
+    @Mock
+    private CourseRepository courseRepository;
+
+    @Mock
+    private UserRepository userRepository;
+
+    @Mock
+    private OrderRepository orderRepository;
+
+    @Mock
+    private UserCourseRepository userCourseRepository;
+
+    @InjectMocks
+    private PaymentService paymentService;
+
+    private Course mockCourse;
+    private User mockUser;
+
+    @BeforeEach
+    void setUp() {
+        mockCourse = new Course();
+        mockCourse.setId(2);
+        mockCourse.setPrice(new BigDecimal("5000.00"));
+
+        mockUser = new User();
+        mockUser.setId(2);
+        mockUser.setEmail("student@st.phenikaa-uni.edu.vn");
+    }
+
+    @Test
+    @DisplayName("UT-PAY-01: Tạo thanh toán cho khóa học tồn tại sử dụng đúng giá server")
+    void testCreatePayment_Success_UsesServerPrice() {
+        CreatePaymentRequest req = new CreatePaymentRequest();
+        req.setItemId(2); // Thay setCourseId thành setItemId
+        req.setItemType(Order.ItemType.COURSE); // Gán thêm itemType nếu DTO yêu cầu
+
+        when(courseRepository.findById(2)).thenReturn(Optional.of(mockCourse));
+        when(userRepository.findByEmail(mockUser.getEmail())).thenReturn(Optional.of(mockUser));
+        when(orderRepository.save(any(Order.class))).thenAnswer(i -> i.getArguments()[0]);
+
+        PaymentInitResponse response = paymentService.createPaymentOrder(mockUser.getEmail(), req);
+
+        assertNotNull(response);
+        assertEquals(new BigDecimal("5000.00"), response.getAmount(), "Bắt buộc lấy giá gốc 5000.00 từ DB");
+    }
+
+    @Test
+    @DisplayName("UT-PAY-02: Từ chối tạo thanh toán nếu khóa học không tồn tại")
+    void testCreatePayment_CourseNotFound() {
+        CreatePaymentRequest req = new CreatePaymentRequest();
+        req.setItemId(999); // Thay setCourseId thành setItemId
+        req.setItemType(Order.ItemType.COURSE);
+
+        when(courseRepository.findById(999)).thenReturn(Optional.empty());
+
+        assertThrows(IllegalArgumentException.class, () -> {
+            paymentService.createPaymentOrder(mockUser.getEmail(), req);
+        });
+    }
+
+    @Test
+    @DisplayName("UT-PAY-03: Webhook chữ ký không hợp lệ bị từ chối")
+    void testProcessWebhook_InvalidSignature() {
+        String invalidToken = "invalid_sepay_secure_token";
+        
+        boolean result = paymentService.processWebhook(invalidToken, "KWM596440");
+        
+        assertFalse(result);
+        verify(orderRepository, never()).save(any(Order.class));
+    }
+
+    @Test
+    @DisplayName("UT-PAY-04: Webhook bị gửi trùng (Order đã SUCCESS) không xử lý lại")
+    void testProcessWebhook_DuplicateIdempotency() {
+        Order completedOrder = new Order();
+        completedOrder.setOrderCode("KWM596440");
+        completedOrder.setStatus("SUCCESS");
+
+        when(orderRepository.findByOrderCode("KWM596440")).thenReturn(Optional.of(completedOrder));
+
+        paymentService.processWebhook("valid_secure_token", "KWM596440");
+
+        verify(userCourseRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("UT-PAY-05: Thanh toán thất bại không tạo bản ghi mở khóa user_courses")
+    void testPaymentFailed_DoesNotGrantAccess() {
+        Order failedOrder = new Order();
+        failedOrder.setOrderCode("KWM_FAILED");
+        failedOrder.setStatus("FAILED");
+
+        when(orderRepository.findByOrderCode("KWM_FAILED")).thenReturn(Optional.of(failedOrder));
+
+        paymentService.handlePaymentFailure("KWM_FAILED");
+
+        verify(userCourseRepository, never()).save(any());
+    }
+}

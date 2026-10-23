@@ -1,0 +1,84 @@
+package com.koreanwithme.backend.service;
+
+import com.koreanwithme.backend.entity.Order;
+import com.koreanwithme.backend.entity.UserCourse;
+import com.koreanwithme.backend.repository.OrderRepository;
+import com.koreanwithme.backend.repository.UserCourseRepository;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.security.access.AccessDeniedException;
+
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class CourseEnrollmentTest {
+
+    @Mock
+    private OrderRepository orderRepository;
+
+    @Mock
+    private UserCourseRepository userCourseRepository;
+
+    @InjectMocks
+    private PaymentService paymentService;
+
+    @Test
+    @DisplayName("UT-ENROLL-01: Người thanh toán hợp lệ (SUCCESS) được cấp quyền mở khóa")
+    void testEnrollment_SuccessPayment_GrantsAccess() {
+        Order paidOrder = new Order();
+        paidOrder.setOrderCode("KWM_SUCCESS");
+        paidOrder.setStatus("SUCCESS");
+        paidOrder.setUserId(2);
+        paidOrder.setCourseId(2);
+
+        when(orderRepository.findByOrderCode("KWM_SUCCESS")).thenReturn(Optional.of(paidOrder));
+        when(userCourseRepository.existsByUserIdAndCourseId(2, 2)).thenReturn(false);
+
+        paymentService.confirmDemoPayment("KWM_SUCCESS");
+
+        verify(userCourseRepository, times(1)).save(argThat(uc -> 
+            uc.getUserId() == 2 && uc.getCourseId() == 2
+        ));
+    }
+
+    @Test
+    @DisplayName("UT-ENROLL-02: Mở khóa lặp lại không tạo bản ghi trùng lặp trong user_courses")
+    void testEnrollment_DuplicateEnrollment_Prevented() {
+        Order paidOrder = new Order();
+        paidOrder.setOrderCode("KWM_DUPLICATE");
+        paidOrder.setStatus("SUCCESS");
+        paidOrder.setUserId(2);
+        paidOrder.setCourseId(2);
+
+        when(orderRepository.findByOrderCode("KWM_DUPLICATE")).thenReturn(Optional.of(paidOrder));
+        when(userCourseRepository.existsByUserIdAndCourseId(2, 2)).thenReturn(true);
+
+        paymentService.confirmDemoPayment("KWM_DUPLICATE");
+
+        verify(userCourseRepository, never()).save(any(UserCourse.class));
+    }
+
+    @Test
+    @DisplayName("UT-ENROLL-03: User A không thể kích hoạt mở khóa từ đơn hàng của User B")
+    void testEnrollment_CrossUserAuthorization_Blocked() {
+        Order orderUserB = new Order();
+        orderUserB.setOrderCode("KWM_USER_B");
+        orderUserB.setUserId(99); // Của User B
+        orderUserB.setCourseId(2);
+
+        when(orderRepository.findByOrderCode("KWM_USER_B")).thenReturn(Optional.of(orderUserB));
+
+        // User A (id = 2) cố tình gửi request xác nhận đơn của User B
+        assertThrows(AccessDeniedException.class, () -> {
+            paymentService.confirmPaymentForUser(2, "KWM_USER_B");
+        });
+    }
+}
